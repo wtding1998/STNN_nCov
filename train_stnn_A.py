@@ -27,7 +27,7 @@ import torch.backends.cudnn as cudnn
 
 from get_dataset import get_stnn_data, get_true
 from utils import DotDict, Logger, rmse, boolean_string, get_dir, get_time, time_dir, rmse_np, rmse_np_like_torch, rmse_sum_confirmed
-from stnn import SaptioTemporalNN_v0
+from stnn import SaptioTemporalNN_Argument
 def train(command=False):
     if command == True:
         #######################################################################################################################
@@ -208,7 +208,7 @@ def train(command=False):
     #######################################################################################################################
     # Model
     #######################################################################################################################
-    model = SaptioTemporalNN_v0(relations, opt.nx, opt.nt_train, opt.nd, opt.nz, opt.mode, opt.nhid, opt.nlayers,
+    model = SaptioTemporalNN_Argument(relations, opt.nx, opt.nt_train, opt.nd, opt.nz, opt.mode, opt.nhid, opt.nlayers,
                             opt.dropout_f, opt.dropout_d, opt.activation, opt.periode).to(device)
 
     #######################################################################################################################

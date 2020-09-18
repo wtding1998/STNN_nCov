@@ -1388,326 +1388,7 @@ class SaptioTemporalNN_tanh(nn.Module):
         assert self.mode is not None
         yield self.rel_weights
 
-class SaptioTemporalNN_input(nn.Module):
-    def __init__(self,
-                 relations,
-                 x_input,
-                 nx,
-                 nt,
-                 nd,
-                 nz,
-                 mode=None,
-                 nhid=0,
-                 nlayers=1,
-                 dropout_f=0.,
-                 dropout_d=0.,
-                 activation='tanh',
-                 periode=1,
-                 simple_dec=False):
-        super(SaptioTemporalNN_input, self).__init__()
-        assert (nhid > 0 and nlayers > 1) or (nhid == 0 and nlayers == 1)
-        # attributes
-        self.nt = nt
-        self.nx = nx
-        self.nz = nz
-        self.nd = nd
-        self.mode = mode
-        # kernel
-        device = relations.device
-        if mode is None or mode == 'default' or mode == 'refine':
-            self.relations = torch.cat(
-                (torch.eye(nx).to(device).unsqueeze(1), relations), 1)
-        elif mode == 'discover':
-            self.relations = torch.cat(
-                (torch.eye(nx).to(device).unsqueeze(1), torch.ones(
-                    nx, relations.size(1), nx).to(device)), 1)
-        self.nr = self.relations.size(1) # number of relations, here nr = 2
-        # modules
-        self.drop = nn.Dropout(dropout_f)
-        self.factors = nn.Parameter(torch.randn(nt, nx, nz))
-        self.input_data = x_input
-        if x_input.size() != (nt, nx, nd):
-            print('input size not match')
-            
-        if activation == 'tanh':
-            self.dynamic = MLP_tanh(nz * nx * (self.nr + 1), nhid, nz * nx, nlayers, dropout_d)
-            self.decoder = MLP_tanh(nz * nx, nhid, nd * nx, nlayers, dropout_d)
-            self.input_gate = MLP_tanh(nx * nd, nhid, nx * nz, nlayers, dropout_d)
-            self.activation = torch.tanh
-        elif activation == 'sigmoid':
-            self.dynamic = MLP_sigmoid(nz * nx * (self.nr + 1), nhid, nz * nx, nlayers, dropout_d)
-            self.decoder = MLP_sigmoid(nz * nx, nhid, nd * nx, nlayers, dropout_d)
-            self.input_gate = MLP_sigmoid(nx * nd, nhid, nx * nz, nlayers, dropout_d)
-            self.activation = identity
-        else:
-            self.dynamic = MLP(nz * nx * (self.nr + 1), nhid, nz * nx, nlayers, dropout_d)
-            self.decoder = MLP(nz * nx, nhid, nd * nx, nlayers, dropout_d)
-            self.input_gate = MLP(nx * nd, nhid, nx * nz, nlayers, dropout_d)
-            self.activation = torch.relu
 
-        if mode == 'refine':
-            self.relations.data = self.relations.data.ceil().clamp(0, 1).bool()
-            self.rel_weights = nn.Parameter(
-                torch.Tensor(self.relations.sum().item() - self.nx))
-        elif mode == 'discover':
-            self.rel_weights = nn.Parameter(torch.Tensor(nx, relations.size(1), nx))
-        # init
-        self._init_factors(periode)
-        if self.mode == 'refine':
-            self.rel_weights.data = copy_nonzero_weights(relations)
-        elif self.mode == 'discover':
-            self.rel_weights.data = relations.data
-            
-    def _init_factors(self, periode): #初始化权重
-        initrange = 1.0
-        if periode >= self.nt:
-            self.factors.data.uniform_(-initrange, initrange)
-        else:
-            timesteps = torch.arange(self.factors.size(0)).long()
-            for t in range(periode):
-                idx = timesteps % periode == t
-                idx_data = idx.view(-1, 1, 1).expand_as(self.factors)
-                init = torch.Tensor(self.nx, self.nz).uniform_(
-                    -initrange, initrange).repeat(idx.sum().item(), 1, 1)
-            self.factors.data.masked_scatter_(idx_data, init.view(-1))
-        # if self.mode == 'refine':
-        #     self.rel_weights.data.fill_(0.5)
-        # elif self.mode == 'discover':
-        #     self.rel_weights.data.fill_(1 / self.nx)
-
-    def get_relations(self):
-        if self.mode is None or self.mode == 'default':
-            return self.relations
-        else:
-            weights = F.hardtanh(self.rel_weights, 0, 1)
-            if self.mode == 'refine':
-                intra = self.rel_weights.new(self.nx, self.nx).copy_(
-                    self.relations[:, 0]).unsqueeze(1)
-                inter = self.rel_weights.new_zeros(self.nx, self.nr - 1,
-                                                   self.nx)
-                inter.masked_scatter_(self.relations[:, 1:], weights)
-            if self.mode == 'discover':
-                intra = self.relations[:, 0].unsqueeze(1)
-                inter = weights
-            return torch.cat((intra, inter), 1)
-
-    def update_state(self, state, input_data):
-        '''
-        state : (nt, nx, nz)
-        input : (nt, nx, nd)
-        state_next : (nt, nx, nz)
-        '''
-        state_input = self.input_gate(input_data.view(-1, self.nx*self.nd))
-        rels = self.get_relations()
-        state_rels = []
-        for r in range(self.nr):
-            state_rels.append(rels[:, r].matmul(state)) # (nt, nx, nz)
-        state_rels = torch.cat(state_rels, dim=2).view(-1, self.nr*self.nx*self.nz)
-        state_context = torch.cat([state_rels, state_input], dim=1)
-        # z_context = self.get_relations().matmul(z).view(-1, self.nr * self.nz)
-        state_next = self.dynamic(state_context)
-        return self.activation(state_next).view(-1, self.nx, self.nz)
-
-    def decode_z(self, state):
-        '''
-        state : (nt, nx, nz)
-        x_rec : (nt, nx, nd)
-        '''
-        x_rec = self.decoder(state.view(-1, self.nx*self.nz)).view(-1, self.nx, self.nd)
-        return x_rec
-
-    def dec_closure(self, t_idx):
-        '''
-        t_idx : [t1, t2, ...]
-        '''
-        return self.decode_z(self.drop(self.factors[t_idx]))
-
-    def dyn_closure(self, t_idx):
-        '''
-        t_idx : [t1, t2, ...]
-        '''
-        return self.update_state(self.drop(self.factors[t_idx]), self.input_data[t_idx])
-
-    def generate(self, nsteps, start=-1):
-        '''
-        rec_gen : (nsteps, nx, nd)
-        state_gen : (nsteps, nx, nz)
-        '''
-        final_state = self.factors[start].unsqueeze(0)
-        final_input = self.input_data[start].unsqueeze(0)
-        state_gen = []
-        rec_gen = []
-        for t in range(nsteps):
-            final_state = self.update_state(final_state, final_input)
-            final_input = self.decode_z(final_state)
-            state_gen.append(final_state.squeeze(0))
-            rec_gen.append(final_input.squeeze(0))
-        state_gen = torch.stack(state_gen)
-        rec_gen = torch.stack(rec_gen)
-        return rec_gen, state_gen
-
-    def factors_parameters(self):
-        yield self.factors
-
-    def rel_parameters(self):
-        assert self.mode is not None
-        yield self.rel_weights
-
-class SaptioTemporalNN_concat(nn.Module):
-    def __init__(self,
-                 relations,
-                 x_input,
-                 nx,
-                 nt,
-                 nd,
-                 nz,
-                 mode=None,
-                 nhid=0,
-                 nlayers=1,
-                 dropout_f=0.,
-                 dropout_d=0.,
-                 activation='tanh',
-                 periode=1,
-                 simple_dec=False):
-        super(SaptioTemporalNN_concat, self).__init__()
-        assert (nhid > 0 and nlayers > 1) or (nhid == 0 and nlayers == 1)
-        # attributes
-        self.nt = nt
-        self.nx = nx
-        self.nz = nz
-        self.nd = nd
-        self.mode = mode
-        # kernel
-        device = relations.device
-        if mode is None or mode == 'default' or mode == 'refine':
-            self.relations = torch.cat(
-                (torch.eye(nx).to(device).unsqueeze(1), relations), 1)
-        elif mode == 'discover':
-            self.relations = torch.cat(
-                (torch.eye(nx).to(device).unsqueeze(1), torch.ones(
-                    nx, relations.size(1), nx).to(device)), 1)
-        self.nr = self.relations.size(1) # number of relations, here nr = 2
-        # modules
-        self.drop = nn.Dropout(dropout_f)
-        self.factors = nn.Parameter(torch.randn(nt, nx, nz))
-        self.input_data = x_input
-        if x_input.size() != (nt, nx, nd):
-            print('input size not match')
-        if activation == 'tanh':
-            self.dynamic = MLP_tanh(nz * nx * self.nr, nhid, nz * nx, nlayers, dropout_d)
-            self.decoder = MLP_tanh(nz * nx, nhid, nd * nx, nlayers, dropout_d)
-            self.activation = torch.tanh
-        elif activation == 'sigmoid':
-            self.dynamic = MLP_sigmoid(nz * nx * self.nr, nhid, nz * nx, nlayers, dropout_d)
-            self.decoder = MLP_sigmoid(nz * nx, nhid, nd * nx, nlayers, dropout_d)
-            self.activation = identity
-        else:
-            self.dynamic = MLP(nz * nx * self.nr, nhid, nz * nx, nlayers, dropout_d)
-            self.decoder = MLP(nz * nx, nhid, nd * nx, nlayers, dropout_d)
-            self.activation = torch.relu
-        if mode == 'refine':
-            self.relations.data = self.relations.data.ceil().clamp(0, 1).bool()
-            self.rel_weights = nn.Parameter(
-                torch.Tensor(self.relations.sum().item() - self.nx))
-        elif mode == 'discover':
-            self.rel_weights = nn.Parameter(torch.Tensor(nx, relations.size(1), nx))
-        # init
-        self._init_factors(periode)
-        if self.mode == 'refine':
-            self.rel_weights.data = copy_nonzero_weights(relations)
-        elif self.mode == 'discover':
-            self.rel_weights.data = relations.data
-
-    def _init_factors(self, periode): #初始化权重
-        initrange = 1.0
-        if periode >= self.nt:
-            self.factors.data.uniform_(-initrange, initrange)
-        else:
-            timesteps = torch.arange(self.factors.size(0)).long()
-            for t in range(periode):
-                idx = timesteps % periode == t
-                idx_data = idx.view(-1, 1, 1).expand_as(self.factors)
-                init = torch.Tensor(self.nx, self.nz).uniform_(
-                    -initrange, initrange).repeat(idx.sum().item(), 1, 1)
-            self.factors.data.masked_scatter_(idx_data, init.view(-1))
-        # if self.mode == 'refine':
-        #     self.rel_weights.data.fill_(0.5)
-        # elif self.mode == 'discover':
-        #     self.rel_weights.data.fill_(1 / self.nx)
-
-    def get_relations(self):
-        if self.mode is None or self.mode =='default':
-            return self.relations
-        else:
-            weights = F.hardtanh(self.rel_weights, 0, 1)
-            if self.mode == 'refine':
-                intra = self.rel_weights.new(self.nx, self.nx).copy_(
-                    self.relations[:, 0]).unsqueeze(1)
-                inter = self.rel_weights.new_zeros(self.nx, self.nr - 1,
-                                                   self.nx)
-                inter.masked_scatter_(self.relations[:, 1:], weights)
-            if self.mode == 'discover':
-                intra = self.relations[:, 0].unsqueeze(1)
-                inter = weights
-            return torch.cat((intra, inter), 1)
-
-    def update_state(self, state):
-        '''
-        state : (nt, nx, nz)
-        state_next : (nt, nx, nz)
-        '''
-        rels = self.get_relations()
-        state_rels = []
-        for r in range(self.nr):
-            state_rels.append(rels[:, r].matmul(state)) # (nt, nx, nz)
-        state_context = torch.cat(state_rels, dim=2).view(-1, self.nr*self.nx*self.nz)
-        # z_context = self.get_relations().matmul(z).view(-1, self.nr * self.nz)
-        state_next = self.dynamic(state_context)
-        return self.activation(state_next).view(-1, self.nx, self.nz)
-
-    def decode_z(self, state):
-        '''
-        state : (nt, nx, nz)
-        x_rec : (nt, nx, nd)
-        '''
-        x_rec = self.decoder(state.view(-1, self.nx*self.nz)).view(-1, self.nx, self.nd)
-        return x_rec
-
-    def dec_closure(self, t_idx):
-        '''
-        t_idx : [t1, t2, ...]
-        '''
-        return self.decode_z(self.drop(self.factors[t_idx]))
-
-    def dyn_closure(self, t_idx):
-        '''
-        t_idx : [t1, t2, ...]
-        '''
-        return self.update_state(self.drop(self.factors[t_idx]))
-
-    def generate(self, nsteps, start=-1):
-        '''
-        rec_gen : (nsteps, nx, nd)
-        state_gen : (nsteps, nx, nz)
-        '''
-        final_state = self.factors[start].unsqueeze(0)
-        state_gen = []
-        rec_gen = []
-        for t in range(nsteps):
-            final_state = self.update_state(final_state)
-            final_input = self.decode_z(final_state)
-            state_gen.append(final_state.squeeze(0))
-            rec_gen.append(final_input.squeeze(0))
-        state_gen = torch.stack(state_gen)
-        rec_gen = torch.stack(rec_gen)
-        return rec_gen, state_gen
-
-    def factors_parameters(self):
-        yield self.factors
-
-    def rel_parameters(self):
-        assert self.mode is not None
-        yield self.rel_weights
 
 class SaptioTemporalNN_input_simple(nn.Module):
     def __init__(self,
@@ -1856,7 +1537,7 @@ class SaptioTemporalNN_input_simple(nn.Module):
         assert self.mode is not None
         yield self.rel_weights
 
-class SaptioTemporalNN_v0(nn.Module):
+class SaptioTemporalNN_Argument(nn.Module):
     def __init__(self,
                  relations,
                  nx,
@@ -1870,7 +1551,7 @@ class SaptioTemporalNN_v0(nn.Module):
                  dropout_d=0.,
                  activation='tanh',
                  periode=1):
-        super(SaptioTemporalNN_v0, self).__init__()
+        super(SaptioTemporalNN_Argument, self).__init__()
         assert (nhid > 0 and nlayers > 1) or (nhid == 0 and nlayers == 1)
         # attributes
         self.nt = nt
@@ -2217,7 +1898,7 @@ class SaptioTemporalNN_classical(nn.Module):
     #     assert self.mode is not None
     #     yield self.rel_weights
 
-class SaptioTemporalNN_input_2(nn.Module):
+class SaptioTemporalNN_Input(nn.Module):
     def __init__(self,
                  relations,
                  x_input,
@@ -2232,7 +1913,7 @@ class SaptioTemporalNN_input_2(nn.Module):
                  dropout_d=0.,
                  activation='tanh',
                  periode=1):
-        super(SaptioTemporalNN_input_2, self).__init__()
+        super(SaptioTemporalNN_Input, self).__init__()
         assert (nhid > 0 and nlayers > 1) or (nhid == 0 and nlayers == 1)
         # attributes
         self.nt = nt
