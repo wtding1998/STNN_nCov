@@ -1,23 +1,6 @@
 # ignore
-rnn.slurm
-result.todo
-test_result.ipynb
-get_data_from_csv.py
-test_fun.py
-debug.log
-test.ipynb
 __pycache__/
 .ipynb_checkpoints/
 .mypy_cache/
 .vscode/
-data/test
-data/bike
-data/smallbike
-blog.py
-keras_model.h5
-pred.txt
-test_dropout.py
-others.ipynb
-mytest.py
-scr_output.txt
-test.py
+output/

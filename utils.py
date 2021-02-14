@@ -17,7 +17,8 @@ def rmse(x_pred, x_target, reduce=True):
     return mse
 
 def rmse_sum_confirmed(x_pred, x_target):
-    mse = torch.norm(x_pred.sum(1) - x_target.sum(1)).item()
+    nt = x_pred.size(0)
+    mse = torch.norm(x_pred.sum(1) - x_target.sum(1)).item() / np.sqrt(nt)
     return mse
 
 def rmse_np(x_pred, x_target, dim=2):
@@ -87,6 +88,46 @@ class DotDict(dict):
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
 
+def sample(n, batch_size=100000, sample_method='uniform', p=None):
+    """
+    sample from data, the methods are from:
+    Better Theory for SGD in the Nonconvex World
+    """
+    if "swr" in sample_method:
+        batches = torch.arange(n).unsqueeze(0)
+        if not p:
+           p = 1 / n * np.ones(n)
+        if sample_method == 'swr':
+            # sampling with replacement
+            S = np.zeros(n)
+            for _ in range(batch_size):
+                i = np.random.randint(0, n)
+                S[i] += 1
+            vi = torch.ones(batches[0].size(0), 1, dtype=torch.float)
+            for i in range(n):
+                vi[i][0] = S[i] / (batch_size * p[i])
+        elif sample_method == 'iswr':
+            # independent sampling without replacement
+            vi = np.random.binomial(1, p, n)
+            vi = vi / p
+            vi = torch.Tensor(vi).unsqueeze(1)
+        else:
+            # nice sampling without replacement
+            if batch_size > n:
+                batch_size = n
+            vi = random.sample(range(n), batch_size)
+            vi = torch.Tensor(vi).view(-1, 1)
+            vi = vi * n / batch_size
+        v = [vi]
+    else:
+        idx_perm = torch.randperm(n)
+        batches = idx_perm.split(batch_size)
+        v = []
+        for i in range(len(batches)):
+            vi = torch.ones(batches[i].size(0), 1, dtype=torch.float)
+            v.append(vi)
+    return batches, v
+
 
 class Logger(object):
     def __init__(self, log_dir, name, chkpt_interval):
@@ -116,7 +157,7 @@ class Logger(object):
         torch.save(model.state_dict(), self.model_path)      
 
 def get_dir(outputdir):
-    return os.path.abspath(os.path.join(os.getcwd(), "..", "output", outputdir))
+    return os.path.abspath(os.path.join(os.getcwd(), ".", "output", outputdir))
 
 def get_time():
     return datetime.datetime.now().strftime('%m-%d-%H-%M-%S') + '_' + str(random.random())[3:7]
@@ -223,4 +264,6 @@ if __name__ == "__main__":
     # a = torch.ones(2, 3, 3).float()
     # b = torch.zeros(2, 3, 3).float()
     # print(copy_nonzero_weights(a))
-    print(get_new_add('test_rnn'))
+    # print(get_new_add('test_rnn'))
+    b, v = sample(10, sample_method='sample_with_replacement')
+    print(v)

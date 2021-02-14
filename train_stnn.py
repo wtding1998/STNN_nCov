@@ -1,163 +1,114 @@
-'''
-province order :
-['上海市', '云南省', '内蒙古', '北京市', '吉林省', '四川省', '天津市', '宁夏', '安徽省', '山东省',
-       '山西省', '广东省', '广西', '新疆', '江苏省', '江西省', '河北省', '河南省', '浙江省', '海南省',
-       '湖北省', '湖南省', '甘肃省', '福建省', '西藏', '贵州省', '辽宁省', '重庆市', '陕西省', '青海省',
-       '黑龙江省']
-'''
-
-
+ #-*-coding:utf-8 -*-
 
 import os
 import random
 import json
-from collections import defaultdict, OrderedDict
+from collections import defaultdict
 import datetime
-import numpy as np
 
 import configargparse
+import numpy as np
 from tqdm import trange
-
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import torch.backends.cudnn as cudnn
 
-from get_dataset import get_stnn_data, get_true
-from utils import DotDict, Logger, rmse, boolean_string, get_dir, get_time, time_dir, rmse_np, rmse_np_like_torch, rmse_sum_confirmed
-from stnn import SaptioTemporalNN_classical
-def train(command=False):
-    if command == True:
-        #######################################################################################################################
-        # Options - CUDA - Random seed
-        #######################################################################################################################
-        p = configargparse.ArgParser()
-        # -- data
-        p.add('--datadir', type=str, help='path to dataset', default='data')
-        p.add('--dataset', type=str, help='dataset name', default='ncov_confirmed')
-        p.add('--nt_train', type=int, help='time for training', default=50)
-        p.add('--validation_length', type=int, help='validation/train', default=1)
-        p.add('--validation_method', type=str, help='sum | torch', default='torch')
-        p.add('--start_time', type=int, help='start time for data', default=0)
-        p.add('--delete_time', type=int, help='delete time for data', default=0)
-        p.add('--data_normalize', type=str, help='scaled method', default='x')
-        p.add('--relation_normalize', type=str, help='normalize method for relation', default='all')
-        p.add('--relations', type=str, nargs='+', help='choose relations', default='all')
-        p.add('--time_datas', type=str, nargs='+', help='choose time data', default='all')
-        p.add('--increase', type=boolean_string, help='whether to use daily increase data', default=False)
-        # -- xp
-        p.add('--outputdir', type=str, help='path to save xp', default='default')
-        p.add('--xp', type=str, help='xp name', default='stnn')
-        # p.add('--dir_auto', type=boolean_string, help='dataset_model', default=True)
-        p.add('--xp_auto', type=boolean_string, help='time', default=False)
-        p.add('--xp_time', type=boolean_string, help='xp_time', default=True)
-        p.add('--auto', type=boolean_string, help='dataset_model + time', default=False)
-        # -- model
-        p.add('--model', type=str, help='STNN Model', default='default')
-        p.add('--mode', type=str, help='STNN mode (default|refine|discover)', default='default')
-        p.add('--nz', type=int, help='laten factors size', default=1)
-        p.add('--activation', type=str, help='dynamic module activation function (identity|tanh)', default='tanh')
-        p.add('--khop', type=int, help='spatial depedencies order', default=1)
-        p.add('--nhid', type=int, help='dynamic function hidden size', default=0)
-        p.add('--nlayers', type=int, help='dynamic function num layers', default=1)
-        p.add('--nhid_de', type=int, help='dynamic function hidden size', default=0)
-        p.add('--nlayers_de', type=int, help='dynamic function num layers', default=1)
-        p.add('--dropout_f', type=float, help='latent factors dropout', default=.5)
-        p.add('--dropout_d', type=float, help='dynamic function dropout', default=.5)
-        p.add('--dropout_de', type=float, help='dynamic function dropout', default=.5)
-        p.add('--lambd', type=float, help='lambda between reconstruction and dynamic losses', default=.1)
-        # -- optim
-        p.add('--lr', type=float, help='learning rate', default=1e-3)
-        p.add('--optimizer', type=str, help='learning algorithm', default='Adam')
-        p.add('--beta1', type=float, default=.9, help='adam beta1')
-        p.add('--beta2', type=float, default=.999, help='adam beta2')
-        p.add('--eps', type=float, default=1e-8, help='adam eps')
-        p.add('--wd', type=float, help='weight decay', default=1e-6)
-        p.add('--wd_z', type=float, help='weight decay on latent factors', default=1e-7)
-        p.add('--l2_z', type=float, help='l2 between consecutives latent factors', default=0.)
-        p.add('--l1_rel', type=float, help='l1 regularization on relation discovery mode', default=0.)
-        p.add('--sch_bound', type=float, help='learning rate', default=0.001)
-        # -- learning
-        p.add('--batch_size', type=int, default=1, help='batch size')
-        p.add('--patience', type=int, default=150, help='number of epoch to wait before trigerring lr decay')
-        p.add('--nepoch', type=int, default=10, help='number of epochs to train for')
-        p.add('--test', type=boolean_string, default=False, help='test during training')
+from get_dataset import get_stnn_data, get_true_indicate
+from utils import DotDict, Logger, rmse, boolean_string, get_dir, get_time, time_dir, rmse_sum_confirmed, sample
+from stnn import SaptioTemporalNN_classical, SaptioTemporalNN_A, SaptioTemporalNN_I
+import result
 
-        # -- gpu
-        p.add('--device', type=int, default=-1, help='-1: cpu; > -1: cuda device id')
-        # -- seed
-        p.add('--manualSeed', type=int, help='manual seed')
-        # -- logs
-        p.add('--checkpoint_interval', type=int, default=100, help='check point interval')
-        p.add('--log', type=boolean_string, default=False, help='log')
-        p.add('--log_relations', type=boolean_string, default=False, help='log relations')
+def get_opt():
+    """
+    get options from command line
+    """
+    p = configargparse.ArgParser()
+    # -- data
+    p.add('--datadir', type=str, help='path to dataset', default='data')
+    p.add('--dataset', type=str, help='dataset name', default='Italy')
+    p.add('--nt_train', type=int, help='time for training', default=250)
+    p.add('--nt_val', type=int, help='time for validation', default=10)
+    p.add('--data_normalize', type=str, help='data normalization object (d:for all data|x: for each region)', default='x')
+    p.add('--relation_normalize', type=str, help='relation normalizatino object (all:for all data|row: for each row)', default='all')
+    p.add('--relations', type=str, nargs='+', help='list of relations', default='all')
+    p.add('--time_datas', type=str, nargs='+', help='list of data', default='all')
+    p.add('--indicate_data', type=str, help='the data whose val_loss and test_loss are computed', default='confirmed')
+    # -- output
+    p.add('--outputdir', type=str, help='path to save xp', default='test')
+    p.add('--xp', type=str, help='xp name', default='stnn')
+    p.add('--xp_model', type=boolean_string, help='add model name after xp', default=True)
+    p.add('--xp_time', type=boolean_string, help='add time after xp', default=True)
+    # -- model
+    p.add('--model', type=str, help='STNN model (classical|A|I)', default='classical')
+    p.add('--mode', type=str, help='STNN mode (default|refine|discover)', default='default')
+    p.add('--nz', type=int, help='laten factors size', default=1)
+    p.add('--activation', type=str, help='dynamic module activation function (identity|sigmoid|tanh)', default='tanh')
+    p.add('--khop', type=int, help='spatial depedencies order', default=1)
+    p.add('--nhid', type=int, help='hidden size of state network', default=0)
+    p.add('--nlayers', type=int, help='num of layers of state network', default=1)
+    p.add('--nhid_de', type=int, help='hidden size of observation network', default=0)
+    p.add('--nlayers_de', type=int, help='num of layers of observation network', default=1)
+    p.add('--nhid_in', type=int, help='hidden size of input gate (for STNN-I) ', default=0)
+    p.add('--nlayers_in', type=int, help='num of layers of input gate (for STNN-I)', default=1)
+    p.add('--dropout_f', type=float, help='dropout for input factors', default=0)
+    p.add('--dropout_d', type=float, help='dropout for state network', default=0)
+    p.add('--dropout_de', type=float, help='dropout for observation network', default=0)
+    p.add('--dropout_in', type=float, help='dropout for input gate', default=0)
+    p.add('--wd', type=float, help='l2 regularization on parametrs of networks', default=1e-6)
+    p.add('--wd_z', type=float, help='l2 regularzation on latent factors', default=1e-3)
+    p.add('--l2_z', type=float, help='l2 between consecutives latent factors (to make them more continous)', default=0.)
+    p.add('--l1_rel', type=float, help='l1 regularization on relation discovery mode', default=0.)
+    p.add('--lambd', type=float, help='lambda between observation and state losses', default=1)
+    # -- optim
+    p.add('--lr', type=float, help='learning rate', default=1e-3)
+    p.add('--optimizer', type=str, help='learning algorithm (Adam|Rmsprop|SGD|Adagrad)', default='Adam')
+    p.add('--beta1', type=float, help='adam beta1', default=.9)
+    p.add('--beta2', type=float, help='adam beta2', default=.999)
+    p.add('--eps', type=float, help='adam eps', default=1e-8)
+    # -- learning
+    p.add('--nepoch', type=int, help='number of epochs to train for', default=10000)
+    p.add('--batch_size', type=int, help='batch size', default=1000000,)
+    p.add('--sample_method', type=str, help='sample method (swr: sampling with replacement|\
+    iswr: independent sampling without replacement|nswr: tau-nice sampling without replacement|uniform)', default='uniform')
+    # swr: sampling with replacement
+    p.add('--validate', type=boolean_string, help='validate during training', default=True,)
+    # reduce lr according to val loss
+    p.add('--es_start', type=int, help='num of epoch to start considering early stop', default=0)
+    p.add('--patience', type=int, help='number of epoch to wait before trigerring lr decay', default=100)
+    p.add('--es_val_bound', type=float, help='upper bound of val_loss when the epoch is taken into consideration of early stop', default=1e7)
+    p.add('--es_wd_factor', type=float, help='lr decay factor after patience', default=0.1)
+    # reduce lr after certain epoch or not
+    p.add('--reduce_start', type=int, help='num of epoch to start reduce, 0 will not activate this functino', default=0)
+    p.add('--reduce_factor', type=float, help='lr reduce factor', default=0.1)
+    p.add('--test', type=boolean_string, help='save test loss after each epoch', default=True)
+    p.add('--train_meantime', type=boolean_string, help='train state and observation nerwork meantime', default=False)
+    # -- gpu
+    p.add('--device', type=int, help='-1: cpu; > -1: cuda device id', default=-1)
+    # -- seed
+    p.add('--manualSeed', type=int, help='manual seed')
+    # -- logs
+    p.add('--checkpoint_interval', type=int,help='check point interval', default=100)
+    p.add('--log', type=boolean_string, help='log loss during training and save it', default=True)
+    p.add('--log_relations', type=boolean_string, help='log relations', default=False)
+    p.add('--run_min', type=boolean_string, help='training again and stop at the epoch with the minimal test loss', default=False)
+    p.add('--show_fig', type=boolean_string, help='show fitting figure in the end', default=False)
+    # parse
+    opt = DotDict(vars(p.parse_args()))
+    return opt
 
-        # parse
-        opt=DotDict(vars(p.parse_args()))
-        
-    else:
-        print('Use Matlab')
-        opt = DotDict()
-        # -- data
-        opt.datadir = 'data'
-        opt.dataset = 'ncov_confirmed'
-        opt.nt_train = 15
-        opt.start_time = 0
-        opt.rescaled = 'd'
-        opt.relation_normalize = 'row'
-        # -- xp
-        opt.outputdir = 'default'
-        opt.xp = 'stnn'
-        # opt.dir_auto =  True
-        opt.xp_auto =  False
-        opt.xp_time =  True
-        opt.auto = False
-        # -- model
-        opt.mode = 'default'
-        opt.nz =1
-        opt.activation = 'tanh'
-        opt.khop = 1
-        opt.nhid = 0
-        opt.nlayers =1
-        opt.dropout_f = .5
-        opt.dropout_d = .5
-        opt.lambd = .1
-        # -- optim
-        opt.lr = 3e-3
-        opt.beta1 = .0
-        opt.beta2 = .999
-        opt.eps = 1e-9 
-        opt.wd = 1e-6
-        opt.wd_z = 1e-7
-        opt.l2_z = 0.
-        opt.l1_rel = 0.
-        opt.sch_bound = 0.017
-        # -- learning
-        opt.batch_size = 1000
-        opt.patience = 150
-        opt.nepoch = 100
-        opt.test = False
-        opt.device = -1
-        print(opt)
-
-    # if opt.dir_auto:
-    #     opt.outputdir = opt.dataset + "_" + opt.mode 
-    if opt.increase:
-        opt.dataset = opt.dataset + '_increase'
-    if opt.outputdir == 'default':
-        opt.outputdir = opt.dataset + "_" + opt.mode
+def train_by_opt(opt):
+    """
+    train stnn according to option
+    """
+    # path of output directory
     opt.outputdir = get_dir(opt.outputdir)
-
+    if opt.xp_model:
+        opt.xp = opt.xp + '-' + opt.model
     if opt.xp_time:
         opt.xp = opt.xp + "_" + get_time()
-    if opt.xp_auto:
-        opt.xp = get_time()
-    if opt.auto_all:
-        opt.outputdir = opt.dataset + "_" + opt.mode 
-        opt.xp = get_time()
+    # mode
     opt.mode = opt.mode if opt.mode in ('refine', 'discover') else None
-    opt.xp = 'classical-' + opt.xp
+    # log time
     opt.start = time_dir()
     start_st = datetime.datetime.now()
     opt.st = datetime.datetime.now().strftime('%y-%m-%d-%H-%M-%S')
@@ -174,48 +125,62 @@ def train(command=False):
     torch.manual_seed(opt.manualSeed)
     if opt.device > -1:
         torch.cuda.manual_seed_all(opt.manualSeed)
-
     #######################################################################################################################
     # Data
     #######################################################################################################################
     # -- load data
-
-    setup, (train_data, test_data, validation_data), relations = get_stnn_data(opt.datadir, opt.dataset, opt.nt_train, opt.khop, opt.start_time, opt.delete_time, data_normalize=opt.data_normalize, relation_normalize=opt.relation_normalize, validation_length=opt.validation_length , relations_names=opt.relations, time_datas=opt.time_datas)
-    # relations = relations[:, :, :, 0]
-    train_data = train_data.to(device)
+    setup, (train_data, no_train_data, validation_data), relations = get_stnn_data(opt.datadir, opt.dataset, opt.nt_train, opt.khop, data_normalize=opt.data_normalize, relation_normalize=opt.relation_normalize, nt_val=opt.nt_val , relations_names=opt.relations, time_datas=opt.time_datas)
+    test_data = no_train_data[opt.nt_val:]
     test_data = test_data.to(device)
+    train_data = train_data.to(device)
     relations = relations.to(device)
     validation_data = validation_data.to(device)
-
+    # -- load option
     for k, v in setup.items():
         opt[k] = v
-    # --- get true validation ---
-    true_validation = get_true(validation_data, opt).to(device)
+    # --- get true validation
+    true_validation = get_true_indicate(validation_data, opt, indicate_data=opt.indicate_data).to(device)
     # -- train inputs
     t_idx = torch.arange(opt.nt_train, out=torch.LongTensor()).unsqueeze(1).expand(opt.nt_train, opt.nx).contiguous()
     x_idx = torch.arange(opt.nx, out=torch.LongTensor()).expand_as(t_idx).contiguous()
-    # dynamic
-    idx_dyn = torch.stack((t_idx[1:], x_idx[1:])).view(2, -1).to(device)
-    nex_dyn = idx_dyn.size(1)
     # decoder
     idx_dec = torch.stack((t_idx, x_idx)).view(2, -1).to(device)
-    nex_dec = idx_dec.size(0)
-
+    nex_dec = idx_dec.size(1)
     #######################################################################################################################
     # Model
     #######################################################################################################################
-    model = SaptioTemporalNN_classical(relations, opt.nx, opt.nt_train, opt.nd, opt.nz, opt.mode, opt.nhid, opt.nlayers,
-                            opt.dropout_f, opt.dropout_d, opt.activation, opt.periode).to(device)
-
+    if opt.model == "classical":
+        model = SaptioTemporalNN_classical(relations, opt.nx, opt.nt_train, opt.nd, opt.nz, opt.mode, opt.nhid, opt.nlayers,
+                                           opt.nhid_de, opt.nlayers_de, opt.dropout_f, opt.dropout_d, opt.activation, opt.periode).to(device)
+        idx_dyn = torch.stack((t_idx[1:], x_idx[1:])).view(2, -1).to(device)
+        nex_dyn = idx_dyn.size(1)
+        params = [{'params': model.factors_parameters(), 'weight_decay': opt.wd_z},
+                {'params': model.dynamic.parameters()},
+                {'params': model.decoder.parameters()}]
+    elif opt.model == "A":
+        model = SaptioTemporalNN_A(relations, opt.nx, opt.nt_train, opt.nd, opt.nz, opt.mode, opt.nhid, opt.nlayers, opt.nhid_de, opt.nlayers_de,
+                                opt.dropout_f, opt.dropout_d, opt.activation, opt.periode).to(device)
+        idx_dyn = torch.stack((t_idx[1:], x_idx[1:])).view(2, -1).to(device)
+        nex_dyn = idx_dyn.size(1)
+        params = [{'params': model.factors_parameters(), 'weight_decay': opt.wd_z},
+                {'params': model.dynamic.parameters()},
+                {'params': model.decoder.parameters()}]
+    elif opt.model == "I":
+        model = SaptioTemporalNN_I(relations, train_data, opt.nx, opt.nt_train, opt.nd, opt.nz, opt.mode, opt.nhid, opt.nlayers, opt.nhid_de, opt.nlayers_de,
+                                   opt.dropout_f, opt.dropout_d, opt.activation, opt.periode, opt.nhid_in, opt.nlayers_in, opt.dropout_in).to(device)
+        idx_dyn = torch.stack((t_idx[2:], x_idx[2:])).view(2, -1).to(device)
+        nex_dyn = idx_dyn.size(1)
+        params = [{'params': model.factors_parameters(), 'weight_decay': opt.wd_z},
+                {'params': model.dynamic.parameters()},
+                {'params': model.decoder.parameters()},
+                {'params': model.input_gate.parameters()}]
     #######################################################################################################################
     # Optimizer
     #######################################################################################################################
-    params = [{'params': model.factors_parameters(), 'weight_decay': opt.wd_z},
-            {'params': model.dynamic.parameters()},
-            {'params': model.decoder.parameters()}]
+    # append parameters to be updated if refine or discover
     if opt.mode in ('refine', 'discover'):
         params.append({'params': model.rel_parameters(), 'weight_decay': 0.})
-        
+    # -- optimizer
     if opt.optimizer == 'Adam':
         optimizer = optim.Adam(params, lr=opt.lr, betas=(opt.beta1, opt.beta2), eps=opt.eps, weight_decay=opt.wd)
     elif opt.optimizer == 'SGD':
@@ -224,209 +189,242 @@ def train(command=False):
         optimizer = optim.RMSprop(params, lr=opt.lr, weight_decay=opt.wd)
     elif opt.optimizer == 'Adagrad':
         optimizer = optim.Adagrad(params, lr=opt.lr, weight_decay=opt.wd)
-
+    # -- lr scheduler
     if opt.patience > 0:
-        lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=opt.patience)
-    if opt.log_relations:
-        relations_0 = model.get_relations()[:, 1:]
+        test_lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=opt.patience, factor=opt.es_wd_factor, verbose=True)
     #######################################################################################################################
     # Logs
     #######################################################################################################################
     logger = Logger(opt.outputdir, opt.xp, opt.checkpoint_interval)
-    # with open(os.path.join(opt.outputdir, opt.xp, 'config.json'), 'w') as f:
-    #     json.dump(opt, f, sort_keys=True, indent=4)
-
-
+    if opt.log_relations:
+        relations_0 = model.get_relations()[:, 1:]
     #######################################################################################################################
     # Training
     #######################################################################################################################
     lr = opt.lr
-    opt.minsum = 1e8
-    opt.min_sum_epoch = 0
-    opt.minrmse = 1e8
-    opt.min_rmse_epoch = 0
-    if command:
-        pb = trange(opt.nepoch)
-    else:
-        pb = range(opt.nepoch)
+    opt.min_val_sum = 1e8
+    opt.min_val_sum_epoch = 0
+    opt.min_val_rmse = 1e8
+    opt.min_val_rmse_epoch = 0
+    opt.min_test_sum = 1e8
+    opt.min_test_sum_epoch = 0
+    opt.min_test_rmse = 1e8
+    opt.min_test_rmse_epoch = 0
+    opt.epoch = 0
+    pb = trange(opt.nepoch)
     for e in pb:
+        opt.epoch += 1
         # ------------------------ Train ------------------------
         model.train()
         # --- decoder ---
-        idx_perm = torch.randperm(nex_dec).to(device)
-        batches_dec = idx_perm.split(opt.batch_size)
+        # idx_perm = torch.randperm(nex_dec).to(device)
+        # batches_dec = idx_perm.split(opt.batch_size)
+        batches_dec, v = sample(nex_dec, batch_size=opt.batch_size, sample_method=opt.sample_method)
         logs_train = defaultdict(float)
-        for i, batch in enumerate(batches_dec):
-            optimizer.zero_grad()
-            # data
-            input_t = idx_dec[0][batch]
-            input_x = idx_dec[1][batch]
-            x_target = train_data[input_t, input_x]
-            # closure
-            x_rec = model.dec_closure(input_t, input_x)
-            mse_dec = F.mse_loss(x_rec, x_target)
-            # backward
-            mse_dec.backward()
-            # step
-            optimizer.step()
-            # log
-            # logger.log('train_iter.mse_dec', mse_dec.item())
-            logs_train['mse_dec'] += mse_dec.item() * len(batch)
-            # === relation difference ===
-            if opt.log_relations:
-                relation_diff = model.get_relations()[:, 1:] - relations_0
-                for i, rel_name in enumerate(opt.relations_order): 
-                    logs_train[rel_name + '_max'] += relation_diff[:, i].max().item()
-                    logs_train[rel_name + '_min'] += relation_diff[:, i].min().item()
-                    logs_train[rel_name + '_mean'] += relation_diff[:, i].mean().item()
-
-        # --- dynamic ---
-        idx_perm = torch.randperm(nex_dyn).to(device)
-        batches_dyn = idx_perm.split(opt.batch_size)
-        for i, batch in enumerate(batches_dyn):
-            optimizer.zero_grad()
-            # data
-            input_t = idx_dyn[0][batch]
-            input_x = idx_dyn[1][batch]
-            # closure
-            z_inf = model.factors[input_t, input_x]
-            z_pred = model.dyn_closure(input_t - 1, input_x)
-            # loss
-            mse_dyn = z_pred.sub(z_inf).pow(2).mean()
-            loss_dyn = mse_dyn * opt.lambd
-            if opt.l2_z > 0:
-                loss_dyn += opt.l2_z * model.factors[input_t - 1, input_x].sub(model.factors[input_t, input_x]).pow(2).mean()
-            if opt.mode in('refine', 'discover') and opt.l1_rel > 0:
-                # rel_weights_tmp = model.rel_weights.data.clone()
-                loss_dyn += opt.l1_rel * model.get_relations().abs().mean()
-            # backward
-            loss_dyn.backward()
-            # step
-            optimizer.step()
-            # clip
-            # if opt.mode == 'discover' and opt.l1_rel > 0:  # clip
-            #     sign_changed = rel_weights_tmp.sign().ne(model.rel_weights.data.sign())
-            #     model.rel_weights.data.masked_fill_(sign_changed, 0)
-            # log
-            # logger.log('train_iter.mse_dyn', mse_dyn.item())
-            logs_train['mse_dyn'] += mse_dyn.item() * len(batch)
-            logs_train['loss_dyn'] += loss_dyn.item() * len(batch)
-            # === relation diffenerce ===
-            if opt.log_relations:
-                relation_diff = model.get_relations()[:, 1:] - relations_0
-                for i, rel_name in enumerate(opt.relations_order): 
-                    logs_train[rel_name + '_max'] += relation_diff[:, i].max().item()
-                    logs_train[rel_name + '_min'] += relation_diff[:, i].min().item()
-                    logs_train[rel_name + '_mean'] += relation_diff[:, i].mean().item()
+        if opt.train_meantime:
+            for i, batch in enumerate(batches_dec):
+                optimizer.zero_grad()
+                # data
+                input_t = idx_dec[0][batch]
+                input_x = idx_dec[1][batch]
+                x_target = train_data[input_t, input_x]
+                # closure
+                x_rec = model.dec_closure(input_t, input_x)
+                # times weight
+                x_target = x_target * v[i]
+                x_rec = x_rec * v[i]
+                mse_dec = F.mse_loss(x_rec, x_target)
+                # log
+                # logger.log('train_iter.mse_dec', mse_dec.item())
+                logs_train['mse_dec'] += mse_dec.item() * len(batch)
+                # dyn
+                batch_dyn = []
+                v_dyn = []
+                for j in range(len(batch)):
+                    if batch[j] < nex_dyn:
+                        batch_dyn.append(batch[j])
+                        v_dyn.append(v[i][j])
+                # batch_dyn = [b for b in batch if b < nex_dyn]
+                if batch_dyn == []:
+                    mse_dec.backward()
+                    optimizer.step()
+                    continue
+                else:
+                    batch_dyn = torch.tensor(batch_dyn).to(device)
+                    v_dyn = torch.tensor(v_dyn).view(-1, 1).to(device)
+                # data
+                input_t = idx_dyn[0][batch_dyn]
+                input_x = idx_dyn[1][batch_dyn]
+                # closure
+                z_inf = model.factors[input_t, input_x]
+                z_pred = model.dyn_closure(input_t - 1, input_x)
+                # times weight
+                z_inf = z_inf * v_dyn
+                z_pred = z_pred * v_dyn
+                # loss
+                mse_dyn = z_pred.sub(z_inf).pow(2).mean()
+                loss_dyn = mse_dyn * opt.lambd
+                if opt.l2_z > 0:
+                    loss_dyn += opt.l2_z * model.factors[input_t - 1, input_x].sub(model.factors[input_t, input_x]).pow(2).mean()
+                if opt.mode in('refine', 'discover') and opt.l1_rel > 0:
+                    loss_dyn += opt.l1_rel * model.get_relations().abs().mean()
+                # backward
+                train_loss = loss_dyn + mse_dec
+                train_loss.backward()
+                # step
+                optimizer.step()
+                # log
+                # logger.log('train_iter.mse_dyn', mse_dyn.item())
+                logs_train['mse_dyn'] += mse_dyn.item() * len(batch_dyn)
+                logs_train['loss_dyn'] += loss_dyn.item() * len(batch_dyn)
+                # --- relation diffenerce
+                if opt.log_relations:
+                    relation_diff = model.get_relations()[:, 1:] - relations_0
+                    for i, rel_name in enumerate(opt.relations_order):
+                        logs_train[rel_name + '_max'] += relation_diff[:, i].max().item()
+                        logs_train[rel_name + '_min'] += relation_diff[:, i].min().item()
+                        logs_train[rel_name + '_mean'] += relation_diff[:, i].mean().item()
+        else:
+            # train respectively
+            for i, batch in enumerate(batches_dec):
+                optimizer.zero_grad()
+                # data
+                input_t = idx_dec[0][batch]
+                input_x = idx_dec[1][batch]
+                x_target = train_data[input_t, input_x]
+                # closure
+                x_rec = model.dec_closure(input_t, input_x)
+                x_target = x_target * v[i]
+                x_rec = x_rec * v[i]
+                mse_dec = F.mse_loss(x_rec, x_target)
+                # backward
+                mse_dec.backward()
+                # step
+                optimizer.step()
+                # log
+                # logger.log('train_iter.mse_dec', mse_dec.item())
+                logs_train['mse_dec'] += mse_dec.item() * len(batch)
+                # === relation difference ===
+                if opt.log_relations:
+                    relation_diff = model.get_relations()[:, 1:] - relations_0
+                    for i, rel_name in enumerate(opt.relations_order):
+                        logs_train[rel_name + '_max'] += relation_diff[:, i].max().item()
+                        logs_train[rel_name + '_min'] += relation_diff[:, i].min().item()
+                        logs_train[rel_name + '_mean'] += relation_diff[:, i].mean().item()
+            # --- dynamic ---
+            # idx_perm = torch.randperm(nex_dyn).to(device)
+            # batches_dyn = idx_perm.split(opt.batch_size)
+            batches_dyn, v = sample(nex_dyn, batch_size=opt.batch_size)
+            for i, batch in enumerate(batches_dyn):
+                optimizer.zero_grad()
+                # data
+                input_t = idx_dyn[0][batch]
+                input_x = idx_dyn[1][batch]
+                # closure
+                z_inf = model.factors[input_t, input_x]
+                z_pred = model.dyn_closure(input_t - 1, input_x)
+                # times weight
+                z_inf = z_inf * v[i]
+                z_pred = z_pred * v[i]
+                # loss
+                mse_dyn = z_pred.sub(z_inf).pow(2).mean()
+                loss_dyn = mse_dyn * opt.lambd
+                if opt.l2_z > 0:
+                    loss_dyn += opt.l2_z * model.factors[input_t - 1, input_x].sub(model.factors[input_t, input_x]).pow(2).mean()
+                if opt.mode in('refine', 'discover') and opt.l1_rel > 0:
+                    loss_dyn += opt.l1_rel * model.get_relations().abs().mean()
+                # backward
+                loss_dyn.backward()
+                optimizer.step()
+                # log
+                # logger.log('train_iter.mse_dyn', mse_dyn.item())
+                logs_train['mse_dyn'] += mse_dyn.item() * len(batch)
+                logs_train['loss_dyn'] += loss_dyn.item() * len(batch)
+                # === relation diffenerce ===
+                if opt.log_relations:
+                    relation_diff = model.get_relations()[:, 1:] - relations_0
+                    for i, rel_name in enumerate(opt.relations_order):
+                        logs_train[rel_name + '_max'] += relation_diff[:, i].max().item()
+                        logs_train[rel_name + '_min'] += relation_diff[:, i].min().item()
+                        logs_train[rel_name + '_mean'] += relation_diff[:, i].mean().item()
         # --- logs ---
-        # TODO:
         logs_train['mse_dec'] /= nex_dec
         logs_train['mse_dyn'] /= nex_dyn
         logs_train['loss_dyn'] /= nex_dyn
-        if opt.log_relations:
-            for i, rel_name in enumerate(opt.relations_order): 
-                logs_train[rel_name + '_max'] /= len(batches_dec) + len(batches_dyn)
-                logs_train[rel_name + '_min'] /= len(batches_dec) + len(batches_dyn)
-                logs_train[rel_name + '_mean'] /= len(batches_dec) + len(batches_dyn)
         logs_train['train_loss'] = logs_train['mse_dec'] + logs_train['loss_dyn']
         if opt.log:
             logger.log('train_epoch', logs_train)
             # checkpoint
             # logger.log('train_epoch.lr', lr)
             logger.checkpoint(model)
-        # ------------------------ Test ------------------------
+    # ------------------------ Test ------------------------
         if opt.test:
             model.eval()
             with torch.no_grad():
-                x_pred, _ = model.generate(opt.validation_length)
-                true_pred = get_true(x_pred, opt)
-                opt.rmse_score = rmse(true_pred, true_validation)
-                opt.sum_score = rmse_sum_confirmed(true_pred, true_validation) / x_pred.size(0)
-            if command:
-                pb.set_postfix(loss=logs_train['train_loss'], sum=opt.sum_score, rmse=opt.rmse_score)
-            else:
-                print(e, 'loss=', logs_train['train_loss'], 'test=', opt.sum_score)
+                x_pred, _ = model.generate(opt.nt - opt.nt_train)
+                x_pred_test = x_pred[opt.nt_val:]
+                opt.test_rmse_score = rmse(get_true_indicate(x_pred_test, opt, opt.indicate_data), get_true_indicate(test_data, opt, opt.indicate_data))
+                opt.test_sum_score = rmse_sum_confirmed(get_true_indicate(x_pred_test, opt, opt.indicate_data), get_true_indicate(test_data, opt, opt.indicate_data))
+            if opt.min_test_sum > opt.test_sum_score:
+                opt.min_test_sum = opt.test_sum_score
+                opt.min_test_sum_epoch = e
+            if opt.min_test_rmse > opt.test_rmse_score:
+                opt.min_test_rmse = opt.test_rmse_score
+                opt.min_test_rmse_epoch = e
             if opt.log:
-                logger.log('test_epoch.rmse', opt.rmse_score)
-                logger.log('test_epoch.sum', opt.sum_score)
-            if opt.minsum > opt.sum_score:
-                opt.minsum = opt.sum_score
-                opt.min_sum_epoch = e
-            if opt.minrmse > opt.rmse_score:
-                opt.minrmse = opt.rmse_score
-                opt.min_rmse_epoch = e
+                logger.log('test_epoch.rmse', opt.test_rmse_score)
+                logger.log('test_epoch.sum', opt.test_sum_score)
+                pb.set_postfix(loss=logs_train['train_loss'], val=opt.val_sum_score, test=opt.test_sum_score)
+        # ------------------------ validation ------------------------
+        if opt.validate:
+            model.eval()
+            with torch.no_grad():
+                x_pred, _ = model.generate(opt.nt_val)
+                true_pred = get_true_indicate(x_pred, opt, opt.indicate_data)
+                opt.val_rmse_score = rmse(true_pred, true_validation)
+                opt.val_sum_score = rmse_sum_confirmed(true_pred, true_validation) 
+            # pb.set_postfix(loss=logs_train['train_loss'], sum=opt.val_sum_score, rmse=opt.val_rmse_score)
+            if opt.log:
+                logger.log('validation_epoch.rmse', opt.val_rmse_score)
+                logger.log('validation_epoch.sum', opt.val_sum_score)
+            if opt.min_val_sum > opt.val_sum_score:
+                opt.min_val_sum = opt.val_sum_score
+                opt.min_val_sum_epoch = e
+            if opt.min_val_rmse > opt.val_rmse_score:
+                opt.min_val_rmse = opt.val_rmse_score
+                opt.min_val_rmse_epoch = e
                 # schedule lr
-            if opt.patience > 0 and opt.sum_score < opt.sch_bound:
-                lr_scheduler.step(opt.sum_score)
+            if opt.patience > 0 and opt.val_sum_score < opt.es_val_bound and e > opt.es_start and opt.es_start > 0:
+                test_lr_scheduler.step(opt.val_sum_score)
             lr = optimizer.param_groups[0]['lr']
-            if lr <= 1e-5:
+            if opt.reduce_start > 0:
+                if opt.reduce_start == e:
+                    for param_group in optimizer.param_groups:
+                        param_group["lr"] = lr * opt.reduce_factor
+            if lr <= 1e-6:
                 break
-        else:
-            if command:
-                pb.set_postfix(loss=logs_train['train_loss'])
-            else:
-                print(e, 'loss=', logs_train['train_loss'])
-    # ------------------------ Test ------------------------
-    model.eval()
-    with torch.no_grad():
-        x_pred, _ = model.generate(opt.nt - opt.nt_train)
-        score_ts = rmse(x_pred, test_data, reduce=False)
-        opt.final_rmse_score = rmse(get_true(x_pred, opt), get_true(test_data, opt))
-        opt.final_sum_score = rmse_sum_confirmed(get_true(x_pred, opt), get_true(test_data, opt)) / opt.validation_length
-
-    # logger.log('test.rmse', score)
-    # logger.log('test.ts', {t: {'rmse': scr.item()} for t, scr in enumerate(score_ts)})
-    # true_pred_data = torch.zeros_like(x_pred)
-    # true_test_data = torch.zeros_like(test_data)
-    # if opt.normalize == 'variance' and opt.data_normalize != 'x':
-    #     true_pred_data = x_pred * opt.std + opt.mean
-    #     true_test_data = test_data * opt.std + opt.mean
-    # elif opt.normalize == 'min_max' and opt.data_normalize != 'x':
-    #     true_pred_data = x_pred * (opt.max - opt.min) + opt.mean
-    #     true_test_data = test_data * (opt.max - opt.min) + opt.mean
-    # elif opt.normalize == 'min_max' and opt.data_normalize != 'x':
-
-    true_pred_data = get_true(x_pred, opt)
-    true_test_data = get_true(test_data, opt)
-
-    true_score = rmse(true_pred_data, true_test_data)
-    # print(true_pred_data)
-
-    x_pred = x_pred.cpu().numpy()
-    test_data = test_data.cpu().numpy()
-    true_pred_data = true_pred_data.cpu().numpy()
-    true_test_data = true_test_data.cpu().numpy()
-    # save pred and loss
-    for i in range(opt.nd):
-        d_pred =true_pred_data[:,:, i]
-        data_kind = opt.datas_order[i]
-        if opt.increase:
-            np.savetxt(os.path.join(get_dir(opt.outputdir), opt.xp, 'increase_' + data_kind + '.txt'), d_pred, delimiter=',')
-        else:
-            np.savetxt(os.path.join(get_dir(opt.outputdir), opt.xp, 'pred_' + data_kind + '.txt'), d_pred, delimiter=',')
-        opt['score_true_' + data_kind] = rmse_np(d_pred, true_test_data[:, :, i])
-        opt['score_' + data_kind] = rmse_np(x_pred[:, :, i], test_data[:, :, i])
-    # save relations
-    if opt.log_relations:
-        final_relations = model.get_relations()[:, 1:].detach().cpu().numpy()
-        for i, rel_name in enumerate(opt.relations_order):
-            single_rel = final_relations[:, i]
-            np.savetxt(os.path.join(get_dir(opt.outputdir), opt.xp, 'rel_' + rel_name + '.txt'), single_rel, delimiter=',')
-    opt.true_loss = true_score
-    opt.train_loss = logs_train['train_loss']
     opt.dec_loss = logs_train['mse_dec']
-    opt.dyn_loss = logs_train['dyn_loss']
+    opt.mse_dyn = logs_train['mse_dyn']
+    opt.dyn_loss = logs_train['loss_dyn']
     opt.train_loss = logs_train['train_loss']
     opt.end = time_dir()
     end_st = datetime.datetime.now()
-    opt.et = datetime.datetime.now().strftime('%y-%m-%d-%H-%M-%S')
     opt.time = str(end_st - start_st)
+    opt.et = datetime.datetime.now().strftime('%y-%m-%d-%H-%M-%S')
     with open(os.path.join(get_dir(opt.outputdir), opt.xp, 'config.json'), 'w') as f:
         json.dump(opt, f, sort_keys=True, indent=4)
     # if opt.log:
     logger.save(model)
-    print()
     print(opt.xp)
+    exp = result.Exp(opt.xp, get_dir(opt.outputdir))
+    exp.get_total_fitting(save=True)
+    exp.show_result(show=opt.show_fig)
+    if opt.run_min:
+        exp.run_min_exp()
+
+def train():
+    opt = get_opt()
+    train_by_opt(opt)
 
 if __name__ == "__main__":
-    train(True)
+    train()

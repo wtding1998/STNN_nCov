@@ -1,3 +1,5 @@
+ #-*-coding:utf-8 -*-
+import math
 import os
 
 import numpy as np
@@ -6,7 +8,7 @@ import torch
 from utils import DotDict, normalize, normalize_all_row
 
 
-def get_time_data(data_dir, disease_name, start_time=0, delete_time = 0, time_datas='all', use_torch=True):
+def get_time_data(data_dir, disease_name, time_datas='all', use_torch=True):
     # data_dir = 'data', disease_name = 'ncov' 
     # return (nt, nx, nd) time series data
     time_data_dir = os.path.join(data_dir, disease_name, 'time_data')
@@ -21,11 +23,7 @@ def get_time_data(data_dir, disease_name, start_time=0, delete_time = 0, time_da
         if len(new_data.shape) == 1:
             new_data = new_data[..., np.newaxis]
         data.append(new_data)
-    print(delete_time)
-    if delete_time > 0:
-        data = np.stack(data, axis=2)[start_time: - delete_time]
-    else:
-        data = np.stack(data, axis=2)[start_time:]
+    data = np.stack(data, axis=2)
     if use_torch:
         return torch.tensor(data).float(), [data_name.replace('.csv', '') for data_name in time_datas]
     else:
@@ -129,10 +127,10 @@ def get_multi_stnn_data(data_dir, disease_name, nt_train, k=1, start_time=0):
     test_data = data[nt_train:]
     return opt, (train_data, test_data), relations
 
-def get_stnn_data(data_dir, disease_name, nt_train, k=1, start_time=0, delete_time=0, data_normalize='d', relation_normalize='all', normalize='variance', validation_length=1, relations_names='all', time_datas='all'):
+def get_stnn_data(data_dir, disease_name, nt_train, k=1, data_normalize='d', relation_normalize='all', normalize='variance', nt_val=1, relations_names='all', time_datas='all'):
     # get dataset
     opt = DotDict()
-    data, opt.datas_order = get_time_data(data_dir, disease_name, start_time, delete_time, time_datas=time_datas)
+    data, opt.datas_order = get_time_data(data_dir, disease_name, time_datas=time_datas)
     opt.nt, opt.nx, opt.nd = data.size()
     opt.normalize = normalize
     opt.data_normalize = data_normalize
@@ -174,13 +172,13 @@ def get_stnn_data(data_dir, disease_name, nt_train, k=1, start_time=0, delete_ti
             opt.mean.append(mean_value)
             data[:, i,:] = (data[:, i,:] - mean_value) / (max_value - min_value)
 
-    opt.validation_length = validation_length
+    opt.nt_val = nt_val
     test_data = data[nt_train:]
     train_data = data[:nt_train]
-    validation_data = test_data[:opt.validation_length]
+    validation_data = test_data[:opt.nt_val]
     return opt, (train_data, test_data, validation_data), relations
 
-def get_keras_dataset(data_dir, disease_name, nt_train, seq_len, start_time=0, normalize='variance', time_datas=['confirmed'], reduce=True):
+def get_keras_dataset(data_dir, disease_name, nt_train, seq_len, start_time=0, normalize='variance', time_datas=['confirmed'], reduce=True, val_ratio=0.1):
     # get dataset
         # data_dir = 'data', disease_name = 'ncov_confirmed' 
     # return (nt, nx, nd) time series data
@@ -212,10 +210,19 @@ def get_keras_dataset(data_dir, disease_name, nt_train, seq_len, start_time=0, n
         data_output.append(data[i+seq_len][np.newaxis, ...])
     data_input = np.concatenate(data_input, axis=0)
     data_output = np.concatenate(data_output, axis=0)
-    train_input = data_input[:nt_train - seq_len]
-    train_output = data_output[:nt_train - seq_len]
-    val_input = data_input[nt_train - seq_len:]
-    val_output = data_output[nt_train - seq_len:]
+    train_size = nt_train - seq_len
+    # train_input = data_input[:train_size]
+    # train_output = data_output[:train_size]
+    val_size = math.ceil((train_size) * val_ratio)
+    random_li = np.random.randint(0, train_size+1,size=[train_size])
+    val_sample = random_li[:val_size]
+    train_sample = random_li[val_size:]
+
+    train_input = data_input[train_sample]
+    train_output = data_output[train_sample]
+    val_input = data_input[val_sample]
+    val_output = data_output[val_sample]
+
     test_data = data[nt_train:]
     test_input = data[nt_train - seq_len:nt_train]
     return opt, (train_input, train_output), (val_input, val_output), (test_input, test_data)
@@ -242,6 +249,16 @@ def get_true(data, opt, use_torch=True):
     
     return true_data
 
+def get_index(opt, indicate_data):
+    datas_order = opt.datas_order
+    return datas_order.index(indicate_data)
+
+def get_true_indicate(data, opt, indicate_data='confirmed', use_torch=True):
+    true_data = get_true(data, opt, use_torch)
+    indicate_index = get_index(opt, indicate_data)
+    return true_data[:, :, indicate_index]
+
+
 if __name__ == "__main__":
     # print(get_time_data('data', 'ncov', 0).size())
     # print(get_keras_dataset('data', 'jar_increase', 7, 2, start_time=3)[1][0])
@@ -260,9 +277,19 @@ if __name__ == "__main__":
     # torch.Size([3, 29])
     # torch.Size([56, 29, 1])
     # --- test stnn data ---
-    opt, (train_data, test_data, validation_data), relations = get_stnn_data('data', 'mar', 8, data_normalize='x')
-    true_train = get_true(train_data, opt)
-    test_true = get_true(test_data, opt)
-    data = torch.cat([true_train, test_true], dim=0)
-    train, _ = get_time_data('data', 'mar')
-    print(torch.norm(data - train))
+    # opt, (train_data, test_data, validation_data), relations = get_stnn_data('data', 'mar', 8, data_normalize='x')
+    # true_train = get_true(train_data, opt)
+    # test_true = get_true(test_data, opt)
+    # data = torch.cat([true_train, test_true], dim=0)
+    # train, _ = get_time_data('data', 'mar')
+    # print(torch.norm(data - train))
+    #
+    # --- test get_time_data and its order ---
+    # a, b = get_time_data("data", "multi_data")
+    # print(b)
+    # print(a[0])
+    # --- test get_true ---
+    opt, (train_data, test_data, validation_data), relations = get_stnn_data("data", "multi_data", 10)
+    true_data = get_true(train_data, opt)
+    print(true_data[0])
+    print(opt.datas_order)
