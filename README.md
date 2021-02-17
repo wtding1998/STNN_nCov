@@ -106,3 +106,5 @@ result.get_result_df(col=['rmse_train_loss', 'rmse_test_loss'])
 result.plot_fitting()
 ```
 显示所有实验的拟合结果。
+
+具体流程可参考 `./test_stnn.ipynb`。
